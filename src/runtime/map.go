@@ -118,8 +118,11 @@ type hmap struct {
 	count     int // # live cells == size of map.  Must be first (used by len() builtin)
 	flags     uint8
 	B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
+					 // B表示对数，B决定了桶的数量，len(buckets) = 2^B, 即B=log2(len(buckets))
+					 // map最多能够装载 loadFactor * 2^B，超出则会触发扩容
+
 	noverflow uint16 // approximate number of overflow buckets; see incrnoverflow for details
-	hash0     uint32 // hash seed
+	hash0     uint32 // hash seed hash随机种子
 
 	buckets    unsafe.Pointer // array of 2^B Buckets. may be nil if count==0.
 	oldbuckets unsafe.Pointer // previous bucket array of half the size, non-nil only when growing
@@ -301,21 +304,25 @@ func makemap_small() *hmap {
 // If h != nil, the map can be created directly in h.
 // If h.buckets != nil, bucket pointed to can be used as the first bucket.
 func makemap(t *maptype, hint int, h *hmap) *hmap {
+	// hint，初始化map的容量
+	// 判断是否溢出或者超出能分配的最大值
 	mem, overflow := math.MulUintptr(uintptr(hint), t.bucket.size)
 	if overflow || mem > maxAlloc {
-		hint = 0
+		hint = 0 // hint设置为0
 	}
 
 	// initialize Hmap
 	if h == nil {
-		h = new(hmap)
+		h = new(hmap) // 构造一个hmap, new返回的是指针
 	}
-	h.hash0 = fastrand()
+	h.hash0 = fastrand()// 获取一个随机种子
 
 	// Find the size parameter B which will hold the requested # of elements.
 	// For hint < 0 overLoadFactor returns false since hint < bucketCnt.
+	// 理论上hint>8才会调用makemap函数, 所以B>=1
+	// 获取map存储对数
 	B := uint8(0)
-	for overLoadFactor(hint, B) {
+	for overLoadFactor(hint, B) {//
 		B++
 	}
 	h.B = B
@@ -323,6 +330,8 @@ func makemap(t *maptype, hint int, h *hmap) *hmap {
 	// allocate initial hash table
 	// if B == 0, the buckets field is allocated lazily later (in mapassign)
 	// If hint is large zeroing this memory could take a while.
+	// if B==0, 则等到赋值的时候才会初始化buckets
+	// if B!=0, 初始化buckets
 	if h.B != 0 {
 		var nextOverflow *bmap
 		h.buckets, nextOverflow = makeBucketArray(t, h.B, nil)
