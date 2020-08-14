@@ -91,9 +91,16 @@ const (
 	// during map writes and thus no one else can observe the map during that time).
 	emptyRest      = 0 // this cell is empty, and there are no more non-empty cells at higher indexes or overflows.
 	emptyOne       = 1 // this cell is empty
+
+				       // 扩容时使用：key和value已经迁移到新的buckets中，但是处于新bucket的前半部分
 	evacuatedX     = 2 // key/elem is valid.  Entry has been evacuated to first half of larger table.
+
+					   // 同evacuatedX，但是key在后半部分
 	evacuatedY     = 3 // same as above, but evacuated to second half of larger table.
+
+					   // cell已经迁移到新的bucket
 	evacuatedEmpty = 4 // cell is empty, bucket is evacuated.
+
 	minTopHash     = 5 // minimum tophash for a normal filled cell.
 
 	// flags
@@ -452,8 +459,8 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 			m >>= 1
 		}
 		oldb := (*bmap)(add(c, (hash&m)*uintptr(t.bucketsize)))
-		if !evacuated(oldb) {
-			b = oldb
+		if !evacuated(oldb) {// evacuated用于判断扩容是否已经完成
+			b = oldb // 没有完成，遍历oldbuckets
 		}
 	}
 
@@ -521,10 +528,15 @@ func mapaccess2(t *maptype, h *hmap, key unsafe.Pointer) (unsafe.Pointer, bool) 
 	m := bucketMask(h.B)
 	b := (*bmap)(unsafe.Pointer(uintptr(h.buckets) + (hash&m)*uintptr(t.bucketsize)))
 	if c := h.oldbuckets; c != nil {
+		// previous bucket array of half the size, non-nil only when growing
+		// 当发生扩容时，oldbuckets不为空
+		// 此时新的buckets还没有内容（未完成扩容），oldbuckets会存放扩容前的元素
+		// 所以一定要在老得里面找，否则可能会发生消失的现象
 		if !h.sameSizeGrow() {
-			// There used to be half as many buckets; mask down one more power of two.
+			// 扩容时，m可能已经改变，若已经扩容，则只需要访问一半的buckets即可，所以m=m/2
 			m >>= 1
 		}
+		// 获取oldbuckets的首地址
 		oldb := (*bmap)(unsafe.Pointer(uintptr(c) + (hash&m)*uintptr(t.bucketsize)))
 		if !evacuated(oldb) {
 			b = oldb
