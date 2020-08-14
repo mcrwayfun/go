@@ -403,28 +403,48 @@ func makeBucketArray(t *maptype, b uint8, dirtyalloc unsafe.Pointer) (buckets un
 // the key is not in the map.
 // NOTE: The returned pointer may keep the whole map live, so don't
 // hold onto it for very long.
+// mapaccess1返回h[key]的指针，若找不到key则返回对应的零值
 func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
-	if raceenabled && h != nil {
+	if raceenabled && h != nil {// always false
 		callerpc := getcallerpc()
 		pc := funcPC(mapaccess1)
 		racereadpc(unsafe.Pointer(h), callerpc, pc)
 		raceReadObjectPC(t.key, key, callerpc, pc)
 	}
-	if msanenabled && h != nil {
+	if msanenabled && h != nil {// always false
 		msanread(key, t.key.size)
 	}
+
+	// h为空，或者元素为0，返回对应的零值
 	if h == nil || h.count == 0 {
 		if t.hashMightPanic() {
 			t.key.alg.hash(key, 0) // see issue 23734
 		}
 		return unsafe.Pointer(&zeroVal[0])
 	}
+
+	// 读写冲突
 	if h.flags&hashWriting != 0 {
 		throw("concurrent map read and map write")
 	}
-	alg := t.key.alg
-	hash := alg.hash(key, uintptr(h.hash0))
+
+	alg := t.key.alg// 拿到hash算法
+	hash := alg.hash(key, uintptr(h.hash0))// 利用hash算法和种子计算hash值
+
+	/**
+	bucketMask: 1<<B-1
+	当B=3, 1<<B-1 = 7, 转换为二进制=0111
+	当B=4, 1<<B-1 = 15, 转换为二进制=1111
+	作用：根据B的位数得到指定位数的1
+	 */
 	m := bucketMask(h.B)
+
+	/*
+	寻找buckets的过程：hash&m，即获取到hash的低m位，用来找到对应的桶的位置。
+	比如64位hash：10010111 | 000011110110110010001111001010100010010110010101010 │ 01010
+	假如b=5，则m=15，则buckets大小 = 2^5 = 32（0-31）
+	二进制为1111（高位省略）, 1111 & hash = 01010，即桶在index=6的位置
+	 */
 	b := (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
 	if c := h.oldbuckets; c != nil {
 		if !h.sameSizeGrow() {
@@ -436,11 +456,17 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 			b = oldb
 		}
 	}
+
+	/**
+	tophash用于取到hash的高8位，top用于定位key在buckets中的位置
+	比如64位hash：10010111 | 000011110110110010001111001010100010010110010101010 │ 01010
+	取到高8位即：10010111=151，则根据这个151去上一步骤的桶找到对应的tophash
+	 */
 	top := tophash(hash)
 bucketloop:
-	for ; b != nil; b = b.overflow(t) {
-		for i := uintptr(0); i < bucketCnt; i++ {
-			if b.tophash[i] != top {
+	for ; b != nil; b = b.overflow(t) {// overflow返回桶的指针
+		for i := uintptr(0); i < bucketCnt; i++ {// 一个桶最多只能放8个元素
+			if b.tophash[i] != top {// 遍历判断tophash中的值
 				if b.tophash[i] == emptyRest {
 					break bucketloop
 				}
