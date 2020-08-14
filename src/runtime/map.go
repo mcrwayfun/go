@@ -464,21 +464,29 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	 */
 	top := tophash(hash)
 bucketloop:
-	for ; b != nil; b = b.overflow(t) {// overflow返回桶的指针
+	for ; b != nil; b = b.overflow(t) {// overflow返回下个桶的首地址
 		for i := uintptr(0); i < bucketCnt; i++ {// 一个桶最多只能放8个元素
 			if b.tophash[i] != top {// 遍历判断tophash中的值
+
+				/*
+				若遇到emptyRest，则直接退出循环
+				这意味着后续的槽都是空的，overflow 指针也是空的
+				 */
 				if b.tophash[i] == emptyRest {
 					break bucketloop
 				}
 				continue
 			}
+			// 获取key的偏移量，定位到key的位置
 			k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
-			if t.indirectkey() {
+			if t.indirectkey() {// key是指针，则解引用
 				k = *((*unsafe.Pointer)(k))
 			}
-			if alg.equal(key, k) {
+			if alg.equal(key, k) {// 若key相等
+				// 定位到value的位置
+				// bmap中key和value是分开存储的，即：key1/key2/key3/value1/value2/value3
 				e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
-				if t.indirectelem() {
+				if t.indirectelem() {// value是指针，则解引用
 					e = *((*unsafe.Pointer)(e))
 				}
 				return e
