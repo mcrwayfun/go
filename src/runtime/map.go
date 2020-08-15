@@ -643,16 +643,23 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if msanenabled {
 		msanread(key, t.key.size)
 	}
-	if h.flags&hashWriting != 0 {
+	if h.flags&hashWriting != 0 {// 不为0，表示正在有goroutine在进行写map操作
 		throw("concurrent map writes")
 	}
+
+	// 获取对应类型的hash算法
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
 
 	// Set hashWriting after calling alg.hash, since alg.hash may panic,
 	// in which case we have not actually done a write.
+	// 标记正在有goroutine在进行写操作
 	h.flags ^= hashWriting
 
+	/*
+	在makemap中，当h.B=0时，不会初始化buckets
+	在进行set才会对buckets进行初始化操作，这叫做懒加载（用时才加载）
+	 */
 	if h.buckets == nil {
 		h.buckets = newobject(t.bucket) // newarray(t.bucket, 1)
 	}
