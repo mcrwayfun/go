@@ -122,7 +122,7 @@ func isEmpty(x uint8) bool {
 type hmap struct {
 	// Note: the format of the hmap is also encoded in cmd/compile/internal/gc/reflect.go.
 	// Make sure this stays in sync with the compiler's definition.
-	count     int // # live cells == size of map.  Must be first (used by len() builtin)
+	count     int // map元素数量 # live cells == size of map.  Must be first (used by len() builtin)
 	flags     uint8
 	B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
 					 // B表示对数，B决定了桶的数量，len(buckets) = 2^B, 即B=log2(len(buckets))
@@ -630,6 +630,8 @@ func mapaccess2_fat(t *maptype, h *hmap, key, zero unsafe.Pointer) (unsafe.Point
 }
 
 // Like mapaccess, but allocates a slot for the key if it is not present in the map.
+// mapassign在runtime期间，会判断出key应该放到哪个地址，但不会将value放入
+// 所以该函数没有传入value
 func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if h == nil {
 		panic(plainError("assignment to entry in nil map"))
@@ -665,55 +667,97 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	}
 
 again:
+	// 获取低B位的值，用来定位bucket的位置
 	bucket := hash & bucketMask(h.B)
-	if h.growing() {
+	if h.growing() {// 正在扩容
 		growWork(t, h, bucket)
 	}
+
+	// 获取对应bucket在内存中的首地址
 	b := (*bmap)(unsafe.Pointer(uintptr(h.buckets) + bucket*uintptr(t.bucketsize)))
+	// 获取hash的高8位，用于定位tophash
 	top := tophash(hash)
 
-	var inserti *uint8
-	var insertk unsafe.Pointer
-	var elem unsafe.Pointer
+	var inserti *uint8         // 目标元素在桶中的索引
+	var insertk unsafe.Pointer // key的地址
+	var elem unsafe.Pointer    // value的地址
 bucketloop:
 	for {
 		for i := uintptr(0); i < bucketCnt; i++ {
 			if b.tophash[i] != top {
+				/*
+				在 b.tophash[i] != top 的情况下，可能会是一个空槽位 = emptyOne
+				一般情况下 map 的槽位分布是这样的，e 表示 empty:
+				[h1][h2][h3][h4][h5][e][e][e]
+				但在执行过 delete 操作时，可能会变成这样:
+				[h1][h2][e][e][h5][e][e][e]
+				所以如果再插入的话，会尽量往前面的位置插
+				[h1][h2][e][e][h5][e][e][e]
+				即执行插入操作后，可能变为
+				[h1][h2][h6][e][h5][e][e][e]
+				 */
 				if isEmpty(b.tophash[i]) && inserti == nil {
-					inserti = &b.tophash[i]
+					// 该槽没有被占，可以向其中插入元素
+					inserti = &b.tophash[i] // tophash插入的位置
 					insertk = add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
 					elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
 				}
-				if b.tophash[i] == emptyRest {
+				if b.tophash[i] == emptyRest {// 不用找了，现有的buckets中没有槽位供插入了
 					break bucketloop
 				}
 				continue
 			}
+
+			// 找到了一个槽位
+			// 根据i计算k的地址（首地址+偏移量）
 			k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
 			if t.indirectkey() {
 				k = *((*unsafe.Pointer)(k))
 			}
+
+			// key不相等，但是落到同一个桶，说明发生了哈希碰撞
 			if !alg.equal(key, k) {
 				continue
 			}
-			// already have a mapping for key. Update it.
+
+			/**
+			具体issue：https://github.com/golang/go/issues/11088
+			解决issue的pr：https://github.com/mcrwayfun/go/commit/00c638d243056b24f1deeb2d1d954e62baedd468
+
+			为什么需要进行key的覆盖？理论上key是不需要覆盖的？
+			比如：当map中已经存在key=0(int), 当下个key=0进行set操作时，直接进行value的覆盖操作不就好了吗？
+			当程序走到这里，说明已经找到了槽位，也解决了哈希碰撞，理论上两个key应该是一样的。
+
+			实际上，key type有区分为 "well-behaved" (the type's equality is byte-by-byte equality) 和其他，
+			当key type是well-behaved时，则可以不用更新key，而是否为well-behaved，由方法needkeyupdate决定。
+			举个例子：对于 m[-0]和m[+0]会被落到同一个槽，但是key确是不一样的，所以需要覆盖！
+			 */
 			if t.needkeyupdate() {
 				typedmemmove(t.key, k, key)
 			}
+
+			// 获取到应该插入的value的地址
 			elem = add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
 			goto done
 		}
+
+		// bucket的8个槽没有找到能够插入值或者更新值的，则遍历overflow去下个bucket找
 		ovf := b.overflow(t)
-		if ovf == nil {
+		if ovf == nil {// overflow已经为空了
 			break
 		}
+		// 赋值为链表的下一个元素，继续循环
 		b = ovf
 	}
 
-	// Did not find mapping for key. Allocate new cell & add entry.
+	// 没有找到对应的key，则分配新的空间
 
-	// If we hit the max load factor or we have too many overflow buckets,
-	// and we're not already in the middle of growing, start growing.
+	// 如果已经超出了最大的 load factor，或者已经有太多的 overflow buckets
+	// 并且这个时刻没有在运行 growing 的途中，则开始进行 growing
+	// 满足以下3个条件会进入扩容：
+	// 1：没有在扩容
+	// 2：装在因子超过了6.5
+	// 3：hash表使用了太多的溢出桶
 	if !h.growing() && (overLoadFactor(h.count+1, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) {
 		hashGrow(t, h)
 		goto again // Growing the table invalidates everything, so try again
@@ -721,25 +765,29 @@ bucketloop:
 
 	if inserti == nil {
 		// all current buckets are full, allocate a new one.
-		newb := h.newoverflow(t, b)
-		inserti = &newb.tophash[0]
+		// 之前在桶中找不到能存入这个tophash的位置
+		// 说明当前所有的 buckets 都是满的，会分配一个新的 bucket
+
+		newb := h.newoverflow(t, b) // 创建一个新的map，并将之前的overflow连上新的节点
+		inserti = &newb.tophash[0]  // 设置tophash的值
 		insertk = add(unsafe.Pointer(newb), dataOffset)
 		elem = add(insertk, bucketCnt*uintptr(t.keysize))
 	}
 
 	// store new key/elem at insert position
-	if t.indirectkey() {
+
+	if t.indirectkey() {// key是指针
 		kmem := newobject(t.key)
 		*(*unsafe.Pointer)(insertk) = kmem
-		insertk = kmem
+		insertk = kmem // 解引用并拿到值
 	}
-	if t.indirectelem() {
+	if t.indirectelem() {// value是指针，
 		vmem := newobject(t.elem)
-		*(*unsafe.Pointer)(elem) = vmem
+		*(*unsafe.Pointer)(elem) = vmem // 解引用
 	}
-	typedmemmove(t.key, insertk, key)
-	*inserti = top
-	h.count++
+	typedmemmove(t.key, insertk, key) // 将新的key存储到对应的位置
+	*inserti = top                    // tophash 插入指定的位置
+	h.count++                         // map元素加1
 
 done:
 	if h.flags&hashWriting == 0 {
