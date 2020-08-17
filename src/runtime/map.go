@@ -645,7 +645,7 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	if msanenabled {
 		msanread(key, t.key.size)
 	}
-	if h.flags&hashWriting != 0 {// 不为0，表示正在有goroutine在进行写map操作
+	if h.flags&hashWriting != 0 {
 		throw("concurrent map writes")
 	}
 
@@ -653,9 +653,8 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
 
-	// Set hashWriting after calling alg.hash, since alg.hash may panic,
-	// in which case we have not actually done a write.
-	// 标记正在有goroutine在进行写操作
+	// 因为alg.hash可能会造成panic，所以在调用alg.hash后需要将 hashWriting 的flag
+	// 此时没有办法一次性完成写操作
 	h.flags ^= hashWriting
 
 	/*
