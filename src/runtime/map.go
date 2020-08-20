@@ -318,12 +318,12 @@ func makemap(t *maptype, hint int, h *hmap) *hmap {
 		hint = 0 // hint设置为0
 	}
 
+	println("h=", h, "hint=", hint)
 	// initialize Hmap
 	if h == nil {
 		h = new(hmap) // 构造一个hmap, new返回的是指针
 	}
 	h.hash0 = fastrand()// 获取一个随机种子
-
 	// Find the size parameter B which will hold the requested # of elements.
 	// For hint < 0 overLoadFactor returns false since hint < bucketCnt.
 	// 理论上hint>8才会调用makemap函数, 所以B>=1
@@ -799,6 +799,7 @@ done:
 	return elem
 }
 
+// map删除操作
 func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 	if raceenabled && h != nil {
 		callerpc := getcallerpc()
@@ -822,8 +823,8 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 	alg := t.key.alg
 	hash := alg.hash(key, uintptr(h.hash0))
 
-	// Set hashWriting after calling alg.hash, since alg.hash may panic,
-	// in which case we have not actually done a write (delete).
+	// 因为alg.hash可能会造成panic，所以在调用alg.hash后需要将 hashWriting 的flag
+	// 此时没有办法一次性完成删除操作
 	h.flags ^= hashWriting
 
 	bucket := hash & bucketMask(h.B)
@@ -831,44 +832,74 @@ func mapdelete(t *maptype, h *hmap, key unsafe.Pointer) {
 		growWork(t, h, bucket)
 	}
 	b := (*bmap)(add(h.buckets, bucket*uintptr(t.bucketsize)))
-	bOrig := b
+	bOrig := b// 保存现有的bucket
 	top := tophash(hash)
 search:
 	for ; b != nil; b = b.overflow(t) {
 		for i := uintptr(0); i < bucketCnt; i++ {
 			if b.tophash[i] != top {
-				if b.tophash[i] == emptyRest {
+				if b.tophash[i] == emptyRest {// 跳出search
 					break search
 				}
 				continue
 			}
+
+			// tophash == top
+			// 找到key的首地址
 			k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
+			// 保存k的地址
 			k2 := k
-			if t.indirectkey() {
+			if t.indirectkey() {// 解引用
 				k2 = *((*unsafe.Pointer)(k2))
 			}
+
+			// key和k2的hash不想等，可能是有hash碰撞，继续遍历
 			if !alg.equal(key, k2) {
 				continue
 			}
 			// Only clear key if there are pointers in it.
+			// 当key是指针时，才清除key
 			if t.indirectkey() {
 				*(*unsafe.Pointer)(k) = nil
 			} else if t.key.ptrdata != 0 {
 				memclrHasPointers(k, t.key.size)
 			}
+
+			// 获取value的地址
 			e := add(unsafe.Pointer(b), dataOffset+bucketCnt*uintptr(t.keysize)+i*uintptr(t.elemsize))
-			if t.indirectelem() {
+			if t.indirectelem() {// value如果是指针的话，则将value设置为空
 				*(*unsafe.Pointer)(e) = nil
 			} else if t.elem.ptrdata != 0 {
 				memclrHasPointers(e, t.elem.size)
 			} else {
 				memclrNoHeapPointers(e, t.elem.size)
 			}
+			// 设置key对应的tophash为 emptyOne
 			b.tophash[i] = emptyOne
 			// If the bucket now ends in a bunch of emptyOne states,
 			// change those to emptyRest states.
 			// It would be nice to make this a separate function, but
 			// for loops are not currently inlineable.
+
+			/**
+			如果bucket以一堆emptyRest结束，则将它们修改为emptyRest状态，否则跳转到notLast
+			举个例子，分两种情况：
+			1：被删除槽位于bmap的尾部，即i=bucketCnt-1
+			[1][1][x][1][x][x][x][emptyOne]
+			if 后继bucket的bmap的tophash[0]是emptyRest，
+				从当前槽位向前，将它们的tophash修改为emptyRest，直到遇到非空槽位则停止
+				[1][1][x][1][emptyRest][emptyRest][emptyRest][emptyRest]
+			else
+				goto ontLast
+
+			2：被删除槽位不在bmap尾部，
+			[1][1][x][1][x][x][emptyOne][x]
+			if 当前槽位的下个槽位是emptyRest，
+				从当前槽位向前，将它们的tophash修改为emptyRest，直到遇到非空槽位则停止
+				[1][1][x][1][emptyRest][emptyRest][emptyRest][emptyRest]
+			else
+				goto ontLast
+			 */
 			if i == bucketCnt-1 {
 				if b.overflow(t) != nil && b.overflow(t).tophash[0] != emptyRest {
 					goto notLast
@@ -878,31 +909,37 @@ search:
 					goto notLast
 				}
 			}
+
+
+			// 从当前槽位向前，将它们的tophash修改为emptyRest，直到遇到非空槽位则停止
 			for {
+				// 设置当前tophash为 emptyRest
 				b.tophash[i] = emptyRest
 				if i == 0 {
 					if b == bOrig {
-						break // beginning of initial bucket, we're done.
+						break // b为进入mapdelete后定位的第一个桶，则break该for循环
 					}
-					// Find previous bucket, continue at its last entry.
 					c := b
+					// 找到bucket中 bmap == c的 bmap（？？？这里是什么操作？）
 					for b = bOrig; b.overflow(t) != c; b = b.overflow(t) {
 					}
 					i = bucketCnt - 1
 				} else {
 					i--
 				}
+
+				// 当前bmap != emptyOne，则break该for循环
 				if b.tophash[i] != emptyOne {
 					break
 				}
 			}
 		notLast:
-			h.count--
+			h.count-- // 元素减1
 			break search
 		}
 	}
 
-	if h.flags&hashWriting == 0 {
+	if h.flags&hashWriting == 0 {// 不允许同时读写（map delete时不允许读）
 		throw("concurrent map writes")
 	}
 	h.flags &^= hashWriting
