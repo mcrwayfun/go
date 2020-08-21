@@ -1171,9 +1171,10 @@ func mapclear(t *maptype, h *hmap) {
 }
 
 func hashGrow(t *maptype, h *hmap) {
-	// If we've hit the load factor, get bigger.
-	// Otherwise, there are too many overflow buckets,
-	// so keep the same number of buckets and "grow" laterally.
+	// 1：装在因子超过了6.5
+	// 2：hash表使用了太多的溢出桶
+	// if case 1：需要对map进行扩容，即B=B+1，bucket总数会变为原来的两倍
+	// if case 2：则保持当前bucket的数量不变，flag设置为sameSizeGrow，横向拓展？
 	bigger := uint8(1)
 	if !overLoadFactor(h.count+1, h.B) {
 		bigger = 0
@@ -1186,16 +1187,16 @@ func hashGrow(t *maptype, h *hmap) {
 	if h.flags&iterator != 0 {
 		flags |= oldIterator
 	}
-	// commit the grow (atomic wrt gc)
+	// 提交扩容结果
 	h.B += bigger
 	h.flags = flags
-	h.oldbuckets = oldbuckets
-	h.buckets = newbuckets
+	h.oldbuckets = oldbuckets // 旧的buckets放到 oldbuckets这个指针上
+	h.buckets = newbuckets    // 新的buckets放到 buckets
 	h.nevacuate = 0
 	h.noverflow = 0
 
 	if h.extra != nil && h.extra.overflow != nil {
-		// Promote current overflow buckets to the old generation.
+		// 把当前的 overflow 赋值给 old overflow
 		if h.extra.oldoverflow != nil {
 			throw("oldoverflow is not nil")
 		}
@@ -1206,11 +1207,14 @@ func hashGrow(t *maptype, h *hmap) {
 		if h.extra == nil {
 			h.extra = new(mapextra)
 		}
+		// 存储over flow空闲空间
+		// src/runtime/map.go:770
 		h.extra.nextOverflow = nextOverflow
 	}
 
 	// the actual copying of the hash table data is done incrementally
 	// by growWork() and evacuate().
+	// 实际的哈希表元素的拷贝工作是在 growWork 和 evacuate 中增量慢慢地进行的
 }
 
 // overLoadFactor reports whether count items placed in 1<<B buckets is over loadFactor.
