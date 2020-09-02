@@ -104,10 +104,10 @@ const (
 	minTopHash     = 5 // minimum tophash for a normal filled cell.
 
 	// flags
-	iterator     = 1 // there may be an iterator using buckets
-	oldIterator  = 2 // there may be an iterator using oldbuckets
-	hashWriting  = 4 // a goroutine is writing to the map
-	sameSizeGrow = 8 // the current map growth is to a new map of the same size
+	iterator     = 1 // 可能有迭代器在使用 buckets ，there may be an iterator using buckets
+	oldIterator  = 2 // 可能有迭代器在使用 oldbuckets，there may be an iterator using oldbuckets
+	hashWriting  = 4 // 有协程正在向map中写入key，a goroutine is writing to the map
+	sameSizeGrow = 8 // 等量扩容，the current map growth is to a new map of the same size
 
 	// sentinel bucket ID for iterator checks
 	noCheck = 1<<(8*sys.PtrSize) - 1
@@ -1183,6 +1183,8 @@ func hashGrow(t *maptype, h *hmap) {
 	oldbuckets := h.buckets
 	newbuckets, nextOverflow := makeBucketArray(t, h.B+bigger, nil)
 
+	// 先把flags中的iterator和oldlterator 对应的位清0
+	// buckets现在已经挂到了oldbuckets的名下了，对应的标志位也要转移过去
 	flags := h.flags &^ (iterator | oldIterator)
 	if h.flags&iterator != 0 {
 		flags |= oldIterator
@@ -1262,11 +1264,12 @@ func (h *hmap) oldbucketmask() uintptr {
 }
 
 func growWork(t *maptype, h *hmap, bucket uintptr) {
-	// make sure we evacuate the oldbucket corresponding
-	// to the bucket we're about to use
+	// 确保我们搬迁的 oldbucket对应的是我们马上就要使用的那一个
+	// 之前使用key&hash的低五位来确定bucket的位置
 	evacuate(t, h, bucket&h.oldbucketmask())
 
 	// evacuate one more oldbucket to make progress on growing
+	// 如果是 growing 状态，再多移一个 oldbucket
 	if h.growing() {
 		evacuate(t, h, h.nevacuate)
 	}
@@ -1286,13 +1289,18 @@ type evacDst struct {
 }
 
 func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
+	// 定位oldbucket的位置
 	b := (*bmap)(add(h.oldbuckets, oldbucket*uintptr(t.bucketsize)))
+	// 获取oldbucket的数量
 	newbit := h.noldbuckets()
+	// 如果b没有被搬迁过
 	if !evacuated(b) {
 		// TODO: reuse overflow buckets instead of using new ones, if there
 		// is no iterator using the old buckets.  (If !oldIterator.)
 
 		// xy contains the x and y (low and high) evacuation destinations.
+		// xy包含移动的目标
+		// x表示bucket的前半部分，y表示bucket的后半部分
 		var xy [2]evacDst
 		x := &xy[0]
 		x.b = (*bmap)(add(h.buckets, oldbucket*uintptr(t.bucketsize)))
@@ -1308,11 +1316,15 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 			y.e = add(y.k, bucketCnt*uintptr(t.keysize))
 		}
 
+		// 遍历所有的bucket，包括overflow的
 		for ; b != nil; b = b.overflow(t) {
 			k := add(unsafe.Pointer(b), dataOffset)
 			e := add(k, bucketCnt*uintptr(t.keysize))
+			// 遍历bucket中所有的槽位
 			for i := 0; i < bucketCnt; i, k, e = i+1, add(k, uintptr(t.keysize)), add(e, uintptr(t.elemsize)) {
+				// 当前槽位的tophash
 				top := b.tophash[i]
+				// 如果当前槽位为空，则标记为已经搬迁过，并继续下一个槽位的操作
 				if isEmpty(top) {
 					b.tophash[i] = evacuatedEmpty
 					continue
@@ -1321,13 +1333,13 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 					throw("bad map state")
 				}
 				k2 := k
-				if t.indirectkey() {
+				if t.indirectkey() {// 解引用
 					k2 = *((*unsafe.Pointer)(k2))
 				}
 				var useY uint8
 				if !h.sameSizeGrow() {
-					// Compute hash to make our evacuation decision (whether we need
-					// to send this key/elem to bucket x or bucket y).
+					// 计算hash，以判断我们的数据要转移到哪一部分的bucket
+					// 可能是x部分，也可能是y部分
 					hash := t.key.alg.hash(k2, uintptr(h.hash0))
 					if h.flags&iterator != 0 && !t.reflexivekey() && !t.key.alg.equal(k2, k2) {
 						// If key != key (NaNs), then the hash could be (and probably
@@ -1341,10 +1353,27 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 						// We recompute a new random tophash for the next level so
 						// these keys will get evenly distributed across all buckets
 						// after multiple grows.
+						// 为什么要加 reflexivekey 的判断，可以参考这里:
+						// https://go-review.googlesource.com/c/go/+/1480
+						// key != key，只有在 float 数的 NaN 时会出现
+						// 比如:
+						// n1 := math.NaN()
+						// n2 := math.NaN()
+						// fmt.Println(n1, n2)
+						// fmt.Println(n1 == n2)
+						// 这种情况下 n1 和 n2 的哈希值也完全不一样
+						// 这里官方表示这种情况是不可复现的
+						// 需要在 iterators 参与的情况下才能复现
+						// 但是对于这种 key 我们也可以随意对其目标进行发配
+						// 同时 tophash 对于 NaN 也没啥意义
+						// 还是按正常的情况下算一个随机的 tophash
+						// 然后公平地把这些 key 平均分布到各 bucket 就好
 						useY = top & 1
 						top = tophash(hash)
 					} else {
+						// 数据迁移到y部分
 						if hash&newbit != 0 {
+							println("hash:%v, newbit:%v, hash&newbit:%v", hash, newbit, hash&newbit)
 							useY = 1
 						}
 					}
@@ -1355,7 +1384,7 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 				}
 
 				b.tophash[i] = evacuatedX + useY // evacuatedX + 1 == evacuatedY
-				dst := &xy[useY]                 // evacuation destination
+				dst := &xy[useY]                 // 移动目标
 
 				if dst.i == bucketCnt {
 					dst.b = h.newoverflow(t, dst.b)
