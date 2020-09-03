@@ -669,6 +669,7 @@ again:
 	// 获取低B位的值，用来定位bucket的位置
 	bucket := hash & bucketMask(h.B)
 	if h.growing() {// 正在扩容
+		println("hmap is growing ", h.count)
 		growWork(t, h, bucket)
 	}
 
@@ -1373,7 +1374,6 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 					} else {
 						// 数据迁移到y部分
 						if hash&newbit != 0 {
-							println("hash:%v, newbit:%v, hash&newbit:%v", hash, newbit, hash&newbit)
 							useY = 1
 						}
 					}
@@ -1393,10 +1393,10 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 					dst.e = add(dst.k, bucketCnt*uintptr(t.keysize))
 				}
 				dst.b.tophash[dst.i&(bucketCnt-1)] = top // mask dst.i as an optimization, to avoid a bounds check
-				if t.indirectkey() {
+				if t.indirectkey() {// 拷贝指针
 					*(*unsafe.Pointer)(dst.k) = k2 // copy pointer
 				} else {
-					typedmemmove(t.key, dst.k, k) // copy elem
+					typedmemmove(t.key, dst.k, k) // 拷贝值
 				}
 				if t.indirectelem() {
 					*(*unsafe.Pointer)(dst.e) = *(*unsafe.Pointer)(e)
@@ -1423,22 +1423,28 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 		}
 	}
 
+	// 如果此次搬迁的bucket等于当前进度，则更新搬迁进度
 	if oldbucket == h.nevacuate {
 		advanceEvacuationMark(h, t, newbit)
 	}
 }
 
 func advanceEvacuationMark(h *hmap, t *maptype, newbit uintptr) {
+	// 进度+1
 	h.nevacuate++
 	// Experiments suggest that 1024 is overkill by at least an order of magnitude.
-	// Put it in there as a safeguard anyway, to ensure O(1) behavior.
+	// Put it in there as a safeguard anyway, to ensure O(1) behav
+	// 尝试向后看1024 bucket
 	stop := h.nevacuate + 1024
 	if stop > newbit {
 		stop = newbit
 	}
+	// 寻找没有搬迁的bucekt
 	for h.nevacuate != stop && bucketEvacuated(t, h, h.nevacuate) {
 		h.nevacuate++
 	}
+
+	// 所有bucket已经搬迁完成
 	if h.nevacuate == newbit { // newbit == # of oldbuckets
 		// Growing is all done. Free old main bucket array.
 		h.oldbuckets = nil
