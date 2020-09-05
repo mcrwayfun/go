@@ -438,14 +438,14 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	alg := t.key.alg// 拿到hash算法
 	hash := alg.hash(key, uintptr(h.hash0))// 利用hash算法和种子计算hash值
 
-	/**
+	/**ma
 	bucketMask: 1<<B-1
 	当B=3, 1<<B-1 = 7, 转换为二进制=0111
 	当B=4, 1<<B-1 = 15, 转换为二进制=1111
 	作用：根据B的位数得到指定位数的1
 	 */
 	m := bucketMask(h.B)
-
+	println("当前的hash", hash, "当前B", h.B, "当前的m", m)
 	/*
 	寻找buckets的过程：hash&m，即获取到hash的低m位，用来找到对应的桶的位置。
 	比如64位hash：10010111 | 000011110110110010001111001010100010010110010101010 │ 01010
@@ -470,6 +470,7 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	取到高8位即：10010111=151，则根据这个151去上一步骤的桶找到对应的tophash
 	 */
 	top := tophash(hash)
+	println("遍历的tophash",top)
 bucketloop:
 	for ; b != nil; b = b.overflow(t) {// overflow返回下个桶的首地址
 		for i := uintptr(0); i < bucketCnt; i++ {// 一个桶最多只能放8个元素
@@ -759,6 +760,7 @@ bucketloop:
 	// 2：装在因子超过了6.5
 	// 3：hash表使用了太多的溢出桶
 	if !h.growing() && (overLoadFactor(h.count+1, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) {
+		println("map is starting to grow", h.B)
 		hashGrow(t, h)
 		goto again // Growing the table invalidates everything, so try again
 	}
@@ -1372,9 +1374,18 @@ func evacuate(t *maptype, h *hmap, oldbucket uintptr) {
 						useY = top & 1
 						top = tophash(hash)
 					} else {
-						// 数据迁移到y部分
+						// 这里写的比较 trick
+						// 比如当前有 8 个桶
+						// 那么如果 hash & 8 != 0
+						// 那么说明这个元素的 hash 这种形式
+						// xxx1xxx
+						// 而扩容后的 bucketMask 是
+						//    1111
+						// 所以实际上这个就是
+						// xxx1xxx & 1000 > 0
+						// 说明这个元素在扩容后一定会去下半区
+						// 所以就是 useY 了
 						if hash&newbit != 0 {
-							// println("hash&newbit != 0, hash:%v, newbit:%v, hash&newbit:%v", hash, newbit, hash&newbit)
 							useY = 1
 						}
 					}
