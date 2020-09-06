@@ -318,7 +318,6 @@ func makemap(t *maptype, hint int, h *hmap) *hmap {
 		hint = 0 // hint设置为0
 	}
 
-	println("h=", h, "hint=", hint)
 	// initialize Hmap
 	if h == nil {
 		h = new(hmap) // 构造一个hmap, new返回的是指针
@@ -445,7 +444,6 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	作用：根据B的位数得到指定位数的1
 	 */
 	m := bucketMask(h.B)
-	println("当前的hash", hash, "当前B", h.B, "当前的m", m)
 	/*
 	寻找buckets的过程：hash&m，即获取到hash的低m位，用来找到对应的桶的位置。
 	比如64位hash：10010111 | 000011110110110010001111001010100010010110010101010 │ 01010
@@ -470,7 +468,6 @@ func mapaccess1(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	取到高8位即：10010111=151，则根据这个151去上一步骤的桶找到对应的tophash
 	 */
 	top := tophash(hash)
-	println("遍历的tophash",top)
 bucketloop:
 	for ; b != nil; b = b.overflow(t) {// overflow返回下个桶的首地址
 		for i := uintptr(0); i < bucketCnt; i++ {// 一个桶最多只能放8个元素
@@ -670,7 +667,6 @@ again:
 	// 获取低B位的值，用来定位bucket的位置
 	bucket := hash & bucketMask(h.B)
 	if h.growing() {// 正在扩容
-		println("hmap is growing ", h.count)
 		growWork(t, h, bucket)
 	}
 
@@ -709,7 +705,7 @@ bucketloop:
 				continue
 			}
 
-			// 找到了一个槽位
+			// tophash == top，说明这个槽位之前已经有值，则需要执行的是覆盖
 			// 根据i计算k的地址（首地址+偏移量）
 			k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
 			if t.indirectkey() {
@@ -760,7 +756,6 @@ bucketloop:
 	// 2：装在因子超过了6.5
 	// 3：hash表使用了太多的溢出桶
 	if !h.growing() && (overLoadFactor(h.count+1, h.B) || tooManyOverflowBuckets(h.noverflow, h.B)) {
-		println("map is starting to grow", h.B)
 		hashGrow(t, h)
 		goto again // Growing the table invalidates everything, so try again
 	}
