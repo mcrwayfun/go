@@ -62,6 +62,7 @@ type Context interface {
 	// Deadline returns the time when work done on behalf of this context
 	// should be canceled. Deadline returns ok==false when no deadline is
 	// set. Successive calls to Deadline return the same results.
+	// 返回 context 是否会被取消以及自动取消时间（即 deadline）
 	Deadline() (deadline time.Time, ok bool)
 
 	// Done returns a channel that's closed when work done on behalf of this
@@ -93,6 +94,7 @@ type Context interface {
 	//
 	// See https://blog.golang.org/pipelines for more examples of how to use
 	// a Done channel for cancellation.
+	// 当 context 被取消或者到了 deadline，返回一个被关闭的 channel
 	Done() <-chan struct{}
 
 	// If Done is not yet closed, Err returns nil.
@@ -100,6 +102,7 @@ type Context interface {
 	// Canceled if the context was canceled
 	// or DeadlineExceeded if the context's deadline passed.
 	// After Err returns a non-nil error, successive calls to Err return the same error.
+	// 在 channel Done 关闭后，返回 context 取消原因
 	Err() error
 
 	// Value returns the value associated with this context for key, or nil
@@ -147,6 +150,7 @@ type Context interface {
 	// 		u, ok := ctx.Value(userKey).(*User)
 	// 		return u, ok
 	// 	}
+	// 获取 key 对应的 value
 	Value(key interface{}) interface{}
 }
 
@@ -239,18 +243,25 @@ func newCancelCtx(parent Context) cancelCtx {
 
 // propagateCancel arranges for child to be canceled when parent is.
 func propagateCancel(parent Context, child canceler) {
+	// 调用父节点的Done方法
+	// 父节点是个空节点，说明是一个emptyCtx或者用户自己实现的ctx
 	if parent.Done() == nil {
 		return // parent is never canceled
 	}
+	// 向上找到可以取消的Ctx
 	if p, ok := parentCancelCtx(parent); ok {
 		p.mu.Lock()
 		if p.err != nil {
-			// parent has already been canceled
+			// 父节点已经被取消了，故需要取消子节点
+			println("propagateCancel 父节点已经被取消了")
 			child.cancel(false, p.err)
 		} else {
+			println("propagateCancel 尚未被取消")
+			// 尚未被取消
 			if p.children == nil {
 				p.children = make(map[canceler]struct{})
 			}
+			// 将子节点挂载到父节点上
 			p.children[child] = struct{}{}
 		}
 		p.mu.Unlock()
@@ -322,6 +333,7 @@ type cancelCtx struct {
 }
 
 func (c *cancelCtx) Done() <-chan struct{} {
+	println("Done method call done", c.String())
 	c.mu.Lock()
 	if c.done == nil {
 		c.done = make(chan struct{})
@@ -356,28 +368,35 @@ func (c *cancelCtx) String() string {
 // cancel closes c.done, cancels each of c's children, and, if
 // removeFromParent is true, removes c from its parent's children.
 func (c *cancelCtx) cancel(removeFromParent bool, err error) {
-	if err == nil {
+	if err == nil { // 必须传err
 		panic("context: internal error: missing cancel error")
 	}
 	c.mu.Lock()
 	if c.err != nil {
 		c.mu.Unlock()
-		return // already canceled
+		return // 已经被其他协程取消
 	}
 	c.err = err
+	// 关闭channel，通知其他协程
 	if c.done == nil {
+		println("cancel method c.done == nil")
 		c.done = closedchan
 	} else {
+		println("c.done != nil, call close")
 		close(c.done)
 	}
+
+	// 遍历所有的子节点
 	for child := range c.children {
 		// NOTE: acquiring the child's lock while holding parent's lock.
+		// 递归取消所有的子节点
 		child.cancel(false, err)
 	}
+	// 将该节点的子节点置空，就是告诉你我放弃你了
 	c.children = nil
 	c.mu.Unlock()
 
-	if removeFromParent {
+	if removeFromParent { // 将当前节点的ctx从父节点树中删除
 		removeChild(c.Context, c)
 	}
 }
