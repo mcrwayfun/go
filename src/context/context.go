@@ -243,8 +243,7 @@ func newCancelCtx(parent Context) cancelCtx {
 
 // propagateCancel arranges for child to be canceled when parent is.
 func propagateCancel(parent Context, child canceler) {
-	// 调用父节点的Done方法
-	// 父节点是个空节点，说明是一个emptyCtx或者用户自己实现的ctx
+	// 调用父节点的Done方法，父节点是个空节点，说明是一个emptyCtx或者用户自己实现的ctx
 	if parent.Done() == nil {
 		return // parent is never canceled
 	}
@@ -252,7 +251,7 @@ func propagateCancel(parent Context, child canceler) {
 	if p, ok := parentCancelCtx(parent); ok {
 		p.mu.Lock()
 		if p.err != nil {
-			// 父节点已经被取消了，故需要取消子节点
+			// cancel 发生时，err字段一定会被赋值，这里说明父节点已经被赋值了
 			println("propagateCancel 父节点已经被取消了")
 			child.cancel(false, p.err)
 		} else {
@@ -261,16 +260,18 @@ func propagateCancel(parent Context, child canceler) {
 			if p.children == nil {
 				p.children = make(map[canceler]struct{})
 			}
-			// 将子节点挂载到父节点上
-			p.children[child] = struct{}{}
+			p.children[child] = struct{}{}// 将当前 cancelCtx挂载到父节点上
 		}
 		p.mu.Unlock()
-	} else {
+	} else {// 用户把context包在了自己的struct就会走到这个分支
 		go func() {
+			println("go func self context")
 			select {
 			case <-parent.Done():
+				println("go func self context parent done")
 				child.cancel(false, parent.Err())
 			case <-child.Done():
+				println("go func self context child done")
 			}
 		}()
 	}
@@ -289,6 +290,7 @@ func parentCancelCtx(parent Context) (*cancelCtx, bool) {
 		case *valueCtx:
 			parent = c.Context
 		default:
+			println("self ctx")
 			return nil, false
 		}
 	}
@@ -412,23 +414,25 @@ func (c *cancelCtx) cancel(removeFromParent bool, err error) {
 // call cancel as soon as the operations running in this Context complete.
 func WithDeadline(parent Context, d time.Time) (Context, CancelFunc) {
 	if cur, ok := parent.Deadline(); ok && cur.Before(d) {
-		// The current deadline is already sooner than the new one.
+		// 如果父节点的deadline更靠前，那当然以父节点的为准，当前节点的deadline可以抛弃
 		return WithCancel(parent)
 	}
 	c := &timerCtx{
 		cancelCtx: newCancelCtx(parent),
 		deadline:  d,
 	}
+	// 向上冒泡，把当前节点的 cancel 函数关联到父 cancelCtx 节点上
 	propagateCancel(parent, c)
 	dur := time.Until(d)
 	if dur <= 0 {
-		c.cancel(true, DeadlineExceeded) // deadline has already passed
+		c.cancel(true, DeadlineExceeded) // 已经超时，退出
 		return c, func() { c.cancel(false, Canceled) }
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.err == nil {
+	if c.err == nil {// 说明父节点到现在还没有取消呢
 		c.timer = time.AfterFunc(dur, func() {
+			// 这个方法到时间了之后会自动执行，当前的 goroutine 不会被阻塞
 			c.cancel(true, DeadlineExceeded)
 		})
 	}
